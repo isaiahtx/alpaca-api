@@ -9,24 +9,27 @@ from rich.logging import RichHandler
 from datetime import datetime, timezone
 from tqdm import tqdm
 import time
-from typing import Set, Dict, List, Callable, TypeVar, Optional, Union, Mapping, Tuple
+from typing import Set, Dict, List, Callable, TypeVar, Optional, Union, Mapping, Tuple, Any
+from collections.abc import Iterable
+from typing import cast
 
 T = TypeVar('T')
 
 logger = logging.getLogger("alpaca_api")
 logger.addHandler(logging.NullHandler())
 
+NEWS_BASE_URL = "https://data.alpaca.markets/v1beta1/news"
+BARS_BASE_URL = "https://data.alpaca.markets/v2/stocks/bars"
+
 class AlpacaRequester:
     api_key: str
     api_secret: str
     headers: Dict[str,str]
     pbars: Set[tqdm]
-    bars_path: str
 
     def __init__(self,
             api_key:Optional[str]=None,
             api_secret:Optional[str]=None,
-            bars_path="bars/{}.csv",
         ) -> None:
         if api_key is None or api_secret is None:
             if load_dotenv():
@@ -46,7 +49,6 @@ class AlpacaRequester:
             "APCA-API-SECRET-KEY": api_secret
         }
 
-        self.bars_path = bars_path
         self.pbars = set()
 
     def close_pbars(self) -> None:
@@ -76,8 +78,6 @@ class AlpacaRequester:
     ) -> logging.Logger:
         """
         Configure and return the library-scoped logger ("alpaca_api").
-
-        Calling this multiple times is safe; existing handlers are cleared to avoid duplicate log records.
         """
         logger = logging.getLogger("alpaca_api")
         logger.setLevel(level)
@@ -90,7 +90,6 @@ class AlpacaRequester:
         if logfile_path is None:
             logfile_path = f"logs/request_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
 
-        # Ensure directory exists
         os.makedirs(os.path.dirname(logfile_path), exist_ok=True)
 
         file_handler = logging.FileHandler(logfile_path, mode="a")
@@ -104,37 +103,50 @@ class AlpacaRequester:
             logger.addHandler(RichHandler())
 
         return logger
-    
+
     @staticmethod
-    def make_bars_url(
-            symbols: Union[str,List[str]],
-            timeframe: str,
-            **kwargs: Union[str,int]
-        ) -> str:
-        """
-        https://docs.alpaca.markets/reference/stockbars
+    def make_url(base:str, **kwargs:Any) -> str:
+        if not kwargs:
+            return base
+        
+        params = []
+        for k, v in kwargs.items():
+            if isinstance(v, Iterable) and not isinstance(v, (str, bytes, bytearray)):
+                joined = "%2C".join(str(v1) for v1 in v)
+                params.append(f"{k}={joined}")
+            else:
+                params.append(f"{k}={v}")
 
-        E.g.: https://data.alpaca.markets/v2/stocks/bars?symbols=AAPL%2CTSLA&timeframe=1T&start=2024-01-01&end=2025-01-01&limit=10000&adjustment=all&asof=2025-01-01&feed=sip&currency=USD&page_token=PAGE_TOKEN&sort=asc
-        """
-        if isinstance(symbols,str):
-            symbols = [symbols]
+        final = f"{base}?{'&'.join(params)}"
+        return final
 
-        if not ("limit" in kwargs):
-            kwargs["limit"] = 10000
-        if "sort" in kwargs:
-            kwargs.pop("sort")
-            logging.getLogger("alpaca_api").warning("Sorting parameter is ignored")
-
-        return f"""https://data.alpaca.markets/v2/stocks/bars?symbols={'%2C'.join(symbols)}&timeframe={timeframe}{''.join(f"&{k}={v}" for k,v in kwargs.items())}"""
+    def write_news(self,
+            news: List[Dict[str,Union[str,int,List[str],List[Dict[str,str]]]]],
+            download_url: str,
+            next_page_token: Optional[str],
+            news_path: str = "news/news.csv"
+        ) -> int:
+        news_df = pd.DataFrame(news)
+        news_df['url'] = download_url
+        news_df['next_page_token'] = next_page_token
+        has_rows = Path(news_path).is_file() and Path(news_path).stat().st_size > 0
+        news_df.to_csv(
+                news_path,
+                mode = 'a' if has_rows else 'w',
+                header = not has_rows,
+                index = False
+        )
+        return len(news)
 
     def write_bars(self,
             bars: Dict[str,List[Dict[str,Union[str,int,float]]]],
             download_url: str,
-            next_page_token: Optional[str] = None
+            next_page_token: Optional[str],
+            bars_path: str = "bars/{}.csv"
         ) -> Dict[str,Dict[str,Union[datetime,int]]]:
         output = {k:{} for k in bars.keys()}
         for ticker,entries in bars.items():
-            path = Path(self.bars_path.format(ticker))
+            path = Path(bars_path.format(ticker))
             has_rows = path.is_file() and path.stat().st_size > 0
             entries_df = pd.DataFrame(entries)
             entries_df['t'] = pd.to_datetime(entries_df['t'])
@@ -152,116 +164,124 @@ class AlpacaRequester:
         
         return output
 
-    @close_pbar_on_exception
-    def get_bars(self,
-            symbols: Union[str,List[str]],
-            timeframe: str,
-            api_options: Dict[str,str] = {},
-            verbose: bool = False,      # There is not much reason to set this to True...
-            logfile_path: Optional[str] = None,
+    def paginate(
+            self,
+            base: str,
+            api_options: Dict[str,Any],
+            data_fmt: Callable[[Dict],Dict[str,pd.DataFrame]],
+            write_path: str,
+            logfile_path: str,
+            log_fmt: Optional[Callable[[Dict[str,pd.DataFrame]], str]] = None,
+            verbose: bool = False,
         ) -> None:
-        """
-        https://docs.alpaca.markets/reference/stockbars
-        """
-        # Set up logging
-        if logfile_path is None:
-            logfile_path = f"logs/bars_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
 
         logger = AlpacaRequester.configure_logging(
             level=logging.INFO,
             logfile_path=logfile_path,
-            to_console=verbose
+            to_console=verbose,
         )
         logger.info(f"Logging to {logfile_path}")
 
-        start_page_token = api_options.pop("page_token",None)
-        base_url = self.make_bars_url(symbols,timeframe,**api_options) 
-        url = base_url if start_page_token is None else f"{base_url}&page_token={start_page_token}"
-        
-        # Set up progress bar
-        pbar = tqdm(total=0,desc="Fetching pages")
+        pbar = tqdm(total=0, desc="Fetching pages")
         self.pbars.add(pbar)
-        pbar.update(0)
 
-        # Make initial request
-        logger.info("--------------------------------")
-        logger.info(f"MAKING INITIAL REQUEST")
-        logger.info("--------------------------------")
-        logger.info(f"Requesting data from {url}")
-        response = requests.get(url, headers=self.headers)
-        
-        next_page_token = start_page_token
-        if response.status_code == 200:  # 200 indicates success
-            logger.info(f"Initial request successful, status code: {response.status_code}")
+        next_page_token = api_options.pop("page_token", None)
+        base_url = self.make_url(base,**api_options)
+        url = base_url if next_page_token is None else f"{base_url}&page_token={next_page_token}"
+        num_pages = 0
+
+        while True:
+            logger.info("--------------------------------")
+            logger.info(f"Requesting data from {url}")
+            response = requests.get(url, headers=self.headers)
+
+            if response.status_code == 429:
+                logger.error(f"Error Status Code {response.status_code}: Rate limit exceeded. Waiting for 5 seconds and retrying...")
+                time.sleep(5)
+                continue
+            elif response.status_code == 403:
+                raise ValueError(
+                    f"Error Status Code {response.status_code}: Authentication headers are missing or invalid. Make sure you authenticate your request with valid API credentials."
+                )
+            elif response.status_code != 200:
+                raise ValueError(f"Error Status Code {response.status_code}: {response.text}")
+
+            if num_pages == 0:
+                logger.info(f"Initial request successful, status code: {response.status_code}")
+            num_pages += 1
             pbar.update(1)
-            rate_limit = int(response.headers['X-RateLimit-Limit'])
-            rate_limit_remaining = int(response.headers['X-RateLimit-Remaining'])
-            rate_limit_reset = int(response.headers['X-RateLimit-Reset'])
-            logger.info(f"Rate limit: {rate_limit}")
-            logger.info(f"Rate limit remaining: {rate_limit_remaining}")
-            logger.info(f"Rate limit reset: {datetime.fromtimestamp(rate_limit_reset)}")
+
+            rate_limit = int(response.headers["X-RateLimit-Limit"])
+            rate_limit_remaining = int(response.headers["X-RateLimit-Remaining"])
+            logger.info(f"Rate limit remaining: {rate_limit_remaining}/{rate_limit}")
 
             body = response.json()
-            next_page_token = body['next_page_token']
-            written = self.write_bars(body['bars'],url,next_page_token)
-            logger.info(f"Wrote:\n\t- {'\n\t- '.join(f"{k}: {v['start']} to {v['end']} ({v['count']} bars)" for k,v in written.items())}")
+            next_page_token = body["next_page_token"]
 
-            logger.info("--------------------------------")
-            logger.info(f"MAKING FURTHER REQUESTS")
-            logger.info("--------------------------------")
+            tables = data_fmt(body)
+            for name,df in tables.items():
+                path = Path(write_path.format(name))
+                has_rows = path.is_file() and path.stat().st_size > 0
+                df['url'] = url
+                df['next_page_token'] = next_page_token
+                df.to_csv(
+                    path,
+                    mode = 'a' if has_rows else 'w',
+                    header = not has_rows,
+                    index = False
+                )
+                has_rows = True
 
-            num_pages = 1
-            while True:
-                if next_page_token is None: # Check if we're at last page
-                    logger.info(f"Finished fetching pages")
-                    break
-                elif rate_limit_remaining == 0: # Check if we've hit the rate limit
-                    # API works by simply giving you a request token every 60/rate_limit seconds, up to rate_limit tokens
-                    # Wait until API limit is half full
-                    to_wait = (rate_limit_reset - time.time()) * 0.5 
-                    logger.info(f"Rate limit exceeded, waiting for {to_wait} seconds")
-                    time.sleep(to_wait)
-                    logger.info("Continuing")
+            if log_fmt is not None:
+                logger.info(log_fmt(tables))
 
-                url = f"{base_url}&page_token={next_page_token}"
-                response = requests.get(url, headers=self.headers)
-                #logger.info(response.json())
+            if next_page_token is None:
+                logger.info("Finished fetching pages")
+                break
 
-                if response.status_code != 200: # Check if request was successful
-                    logger.error(f"Error Status Code {response.status_code}: {response.text}")
-                    raise ValueError(f"Error Status Code {response.status_code}: {response.text}")
+            if rate_limit_remaining == 0:
+                rate_limit_reset = int(response.headers["X-RateLimit-Reset"])
+                to_wait = (rate_limit_reset - time.time()) * 0.5
+                logger.info(f"Rate limit reached, waiting for {to_wait} seconds")
+                time.sleep(to_wait)
 
-                body = response.json()
-                next_page_token = body['next_page_token']
-                written = self.write_bars(body['bars'],url,next_page_token)
+            url = f"{base_url}&page_token={next_page_token}"
 
-                num_pages += 1
-                pbar.update(1)
+        pbar.close()
+        self.pbars.discard(pbar)
 
-                rate_limit_remaining = int(response.headers['X-RateLimit-Remaining'])
-                rate_limit_reset = int(response.headers['X-RateLimit-Reset'])
+    @close_pbar_on_exception
+    def get_bars(self,verbose=False,write_path="bars/{}.csv",**kwargs) -> None:
+        """
+        https://docs.alpaca.markets/reference/stockbars
+        """
+        self.paginate(
+            base=BARS_BASE_URL,
+            api_options=kwargs,
+            data_fmt=lambda body: {k:pd.DataFrame(v).assign(t=lambda df: pd.to_datetime(df['t'])) for k,v in body['bars'].items()},
+            write_path=write_path,
+            logfile_path=f"logs/bars_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log",
+            log_fmt=lambda tables: "Wrote:\n\t- " + "\n\t- ".join(
+                f"{k}: {v.iloc[0]['t']} to {v.iloc[-1]['t']} ({len(v)} bars)" for k, v in tables.items()
+            ),
+            verbose=verbose,
+        )
 
-                logger.info(f"Fetched page {next_page_token}, remaining rate limit: {rate_limit_remaining}/{rate_limit}, {num_pages} pages\n\t- {'\n\t- '.join(f"{k}: {v['start']} to {v['end']} ({v['count']} bars)" for k,v in written.items())}")
-        
-            print("Wrote bars to files")
+        print("Wrote bars to files")
 
-        elif response.status_code == 429:
-            logger.error(f"Error Status Code {response.status_code}: Rate limit exceeded. Waiting for 5 seconds and retrying...")
-            rate_limit = response.headers['X-RateLimit-Limit']
-            rate_limit_remaining = response.headers['X-RateLimit-Remaining']
-            rate_limit_reset = response.headers['X-RateLimit-Reset']
-            logger.info(f"Rate limit: {rate_limit}")
-            logger.info(f"Rate limit remaining: {rate_limit_remaining}")
-            logger.info(f"Rate limit reset: {datetime.fromtimestamp(int(rate_limit_reset))}")
-            time.sleep(5)
-            return self.get_bars(symbols,timeframe,api_options,verbose,logfile_path)
+    @close_pbar_on_exception
+    def get_news(self,verbose:bool=False,write_path:str="news/news.csv",**kwargs) -> None:
+        """
+        https://docs.alpaca.markets/reference/news-3
+        """
+        self.paginate(
+            base=NEWS_BASE_URL,
+            api_options=kwargs,
+            data_fmt=lambda x: {'':pd.DataFrame(x['news'])},
+            write_path=write_path,
+            logfile_path=f"logs/news_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log",
+            log_fmt=lambda tables: f"{len(tables[''])} articles written spanning {tables[''].iloc[0]['created_at']} to {tables[''].iloc[-1]['created_at']}",
+            verbose=verbose,
+        )
 
-        elif response.status_code == 403:
-            error_msg = f"Error Status Code {response.status_code}: Authentication headers are missing or invalid. Make sure you authenticate your request with valid API credentials."
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        else:
-            error_msg = f"Error Status Code {response.status_code}: {response.text}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+        print("Wrote news to files")

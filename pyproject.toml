@@ -4,20 +4,20 @@ version = "0.1.0"
 description = "A python library for working with the Alpaca API"
 authors = [{ name = "Isaiah Dailey", email = "isaiahdaileytx@gmail.com" }]
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
-    "datetime>=5.5",
-    "dotenv>=0.9.9",
-    "ipykernel>=6.29.5",
-    "ipynb>=0.5.1",
-    "matplotlib>=3.10.3",
-    "pandas>=2.3.0",
-    "pip>=25.1.1",
-    "pytest>=8.4.1",
-    "pytest-cov>=6.2.1",
-    "requests>=2.32.4",
-    "rich>=14.0.0",
-    "tqdm>=4.67.1",
+  "datetime>=5.5",
+  "dotenv>=0.9.9",
+  "ipykernel>=6.29.5",
+  "ipynb>=0.5.1",
+  "matplotlib>=3.10.3",
+  "pandas>=2.3.0",
+  "pip>=25.1.1",
+  "pytest>=8.4.1",
+  "pytest-cov>=6.2.1",
+  "requests>=2.32.4",
+  "rich>=14.0.0",
+  "tqdm>=4.67.1",
 ]
 license = { text = "MIT" }
 
