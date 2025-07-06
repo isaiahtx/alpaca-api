@@ -22,7 +22,7 @@ def test_get_account_info_from_args():
 def test_get_data_no_auth():
     X = AlpacaRequester(api_key='a',api_secret='b')
     with pytest.raises(ValueError) as e:
-        X.get_bars
+        X.get_bars()
     
     assert "403" in str(e.value)
 

@@ -1,17 +1,15 @@
 from dotenv import load_dotenv
-from collections import defaultdict
 import os
 from pathlib import Path
 import pandas as pd
 import requests
 import logging
 from rich.logging import RichHandler
-from datetime import datetime, timezone
+from datetime import datetime
 from tqdm import tqdm
 import time
-from typing import Set, Dict, List, Callable, TypeVar, Optional, Union, Mapping, Tuple, Any
+from typing import Set, Dict, Callable, TypeVar, Optional, Any
 from collections.abc import Iterable
-from typing import cast
 
 T = TypeVar('T')
 
@@ -120,50 +118,6 @@ class AlpacaRequester:
         final = f"{base}?{'&'.join(params)}"
         return final
 
-    def write_news(self,
-            news: List[Dict[str,Union[str,int,List[str],List[Dict[str,str]]]]],
-            download_url: str,
-            next_page_token: Optional[str],
-            news_path: str = "news/news.csv"
-        ) -> int:
-        news_df = pd.DataFrame(news)
-        news_df['url'] = download_url
-        news_df['next_page_token'] = next_page_token
-        has_rows = Path(news_path).is_file() and Path(news_path).stat().st_size > 0
-        news_df.to_csv(
-                news_path,
-                mode = 'a' if has_rows else 'w',
-                header = not has_rows,
-                index = False
-        )
-        return len(news)
-
-    def write_bars(self,
-            bars: Dict[str,List[Dict[str,Union[str,int,float]]]],
-            download_url: str,
-            next_page_token: Optional[str],
-            bars_path: str = "bars/{}.csv"
-        ) -> Dict[str,Dict[str,Union[datetime,int]]]:
-        output = {k:{} for k in bars.keys()}
-        for ticker,entries in bars.items():
-            path = Path(bars_path.format(ticker))
-            has_rows = path.is_file() and path.stat().st_size > 0
-            entries_df = pd.DataFrame(entries)
-            entries_df['t'] = pd.to_datetime(entries_df['t'])
-            entries_df['url'] = download_url
-            entries_df['next_page_token'] = next_page_token
-            entries_df.to_csv(
-                path,
-                mode = 'a' if has_rows else 'w',
-                header = not has_rows,
-                index = False
-            )
-            output[ticker]['start'] = entries_df.iloc[0]['t']
-            output[ticker]['end'] = entries_df.iloc[-1]['t']
-            output[ticker]['count'] = len(entries_df)
-        
-        return output
-
     def paginate(
             self,
             base: str,
@@ -255,6 +209,7 @@ class AlpacaRequester:
         """
         https://docs.alpaca.markets/reference/stockbars
         """
+        kwargs['limit'] = 10_000  # maximum limit per request is 10,000
         self.paginate(
             base=BARS_BASE_URL,
             api_options=kwargs,
@@ -274,13 +229,14 @@ class AlpacaRequester:
         """
         https://docs.alpaca.markets/reference/news-3
         """
+        kwargs['limit'] = 50  # maximum limit per request is 50
         self.paginate(
             base=NEWS_BASE_URL,
             api_options=kwargs,
             data_fmt=lambda x: {'':pd.DataFrame(x['news'])},
             write_path=write_path,
             logfile_path=f"logs/news_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log",
-            log_fmt=lambda tables: f"{len(tables[''])} articles written spanning {tables[''].iloc[0]['created_at']} to {tables[''].iloc[-1]['created_at']}",
+            log_fmt=lambda tables: f"{len(tables[''])} articles written spanning {tables[''].iloc[-1]['created_at']} to {tables[''].iloc[0]['created_at']}",
             verbose=verbose,
         )
 

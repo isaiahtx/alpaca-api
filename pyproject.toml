@@ -18,6 +18,7 @@ dependencies = [
   "requests>=2.32.4",
   "rich>=14.0.0",
   "tqdm>=4.67.1",
+  "vulture>=2.14",
 ]
 license = { text = "MIT" }
 
