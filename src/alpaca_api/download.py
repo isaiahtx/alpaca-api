@@ -18,6 +18,7 @@ logger.addHandler(logging.NullHandler())
 
 NEWS_BASE_URL = "https://data.alpaca.markets/v1beta1/news"
 BARS_BASE_URL = "https://data.alpaca.markets/v2/stocks/bars"
+CALENDAR_BASE_URL = "https://paper-api.alpaca.markets/v2/calendar"
 
 class AlpacaRequester:
     api_key: str
@@ -175,6 +176,7 @@ class AlpacaRequester:
             tables = data_fmt(body)
             for name,df in tables.items():
                 path = Path(write_path.format(name))
+                path.parent.mkdir(parents=True, exist_ok=True)
                 has_rows = path.is_file() and path.stat().st_size > 0
                 df['url'] = url
                 df['next_page_token'] = next_page_token
@@ -241,3 +243,14 @@ class AlpacaRequester:
         )
 
         print("Wrote news to files")
+    
+    def market_calendar(self,**kwargs) -> pd.DataFrame:
+        """
+        https://docs.alpaca.markets/reference/getcalendar-1
+        """
+        url = self.make_url(CALENDAR_BASE_URL, **kwargs)
+        response = requests.get(url, headers=self.headers)
+        data = response.json()
+        df = pd.DataFrame(data)
+        df['date'] = pd.to_datetime(df['date'])
+        return df
