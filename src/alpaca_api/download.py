@@ -1,15 +1,16 @@
-from dotenv import load_dotenv
+import logging
 import os
+import time
+from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Set, TypeVar
+
 import pandas as pd
 import requests
-import logging
+from dotenv import load_dotenv
 from rich.logging import RichHandler
-from datetime import datetime
 from tqdm import tqdm
-import time
-from typing import Set, Dict, Callable, TypeVar, Optional, Any
-from collections.abc import Iterable
 
 T = TypeVar('T')
 
@@ -128,6 +129,8 @@ class AlpacaRequester:
             logfile_path: str,
             log_fmt: Optional[Callable[[Dict[str,pd.DataFrame]], str]] = None,
             verbose: bool = False,
+            store_url=True,
+            store_token=True,
         ) -> None:
 
         logger = AlpacaRequester.configure_logging(
@@ -178,8 +181,10 @@ class AlpacaRequester:
                 path = Path(write_path.format(name))
                 path.parent.mkdir(parents=True, exist_ok=True)
                 has_rows = path.is_file() and path.stat().st_size > 0
-                df['url'] = url
-                df['next_page_token'] = next_page_token
+                if store_url:
+                    df['url'] = url
+                if store_token:
+                    df['next_page_token'] = next_page_token
                 df.to_csv(
                     path,
                     mode = 'a' if has_rows else 'w',
@@ -207,7 +212,7 @@ class AlpacaRequester:
         self.pbars.discard(pbar)
 
     @close_pbar_on_exception
-    def get_bars(self,verbose=False,write_path="bars/{}.csv",**kwargs) -> None:
+    def get_bars(self,verbose=False,write_path="bars/{}.csv",store_url=True,store_token=True,**kwargs) -> None:
         """
         https://docs.alpaca.markets/reference/stockbars
         """
@@ -222,12 +227,14 @@ class AlpacaRequester:
                 f"{k}: {v.iloc[0]['t']} to {v.iloc[-1]['t']} ({len(v)} bars)" for k, v in tables.items()
             ),
             verbose=verbose,
+            store_url=store_url,
+            store_token=store_token,
         )
 
         print("Wrote bars to files")
 
     @close_pbar_on_exception
-    def get_news(self,verbose:bool=False,write_path:str="news/news.csv",**kwargs) -> None:
+    def get_news(self,verbose:bool=False,write_path:str="news/news.csv",store_url=True,store_token=True,**kwargs) -> None:
         """
         https://docs.alpaca.markets/reference/news-3
         """
@@ -240,6 +247,8 @@ class AlpacaRequester:
             logfile_path=f"logs/news_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log",
             log_fmt=lambda tables: f"{len(tables[''])} articles written spanning {tables[''].iloc[-1]['created_at']} to {tables[''].iloc[0]['created_at']}",
             verbose=verbose,
+            store_url=store_url,
+            store_token=store_token,
         )
 
         print("Wrote news to files")
